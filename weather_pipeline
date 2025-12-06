@@ -1,0 +1,125 @@
+import os
+import requests
+import sqlite3
+import json
+from datetime import datetime
+
+# Your OpenWeatherMap API key
+API_KEY = os.environ.get("OPENWEATHER_API_KEY", "963b46746c6d8157176bb34b2ae32003")
+
+# Database file name
+DB_NAME = "weather.db"
+
+# List of cities to track
+CITIES = [
+    {"id": 1, "name": "Jalandhar", "country": "IN"},
+    {"id": 2, "name": "Meerut", "country": "IN"},
+    {"id": 3, "name": "Chandigarh", "country": "IN"},
+]
+
+def get_connection():
+    return sqlite3.connect(DB_NAME)
+
+def init_db():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cities (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            country TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS weather_readings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            city_id INTEGER,
+            timestamp_utc TEXT,
+            temperature_c REAL,
+            humidity REAL,
+            wind_speed REAL,
+            FOREIGN KEY(city_id) REFERENCES cities(id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_cities():
+    conn = get_connection()
+    cur = conn.cursor()
+    for city in CITIES:
+        cur.execute("INSERT OR IGNORE INTO cities (id, name, country) VALUES (?, ?, ?)",
+                    (city["id"], city["name"], city["country"]))
+    conn.commit()
+    conn.close()
+
+def fetch_weather(city):
+    url = (
+        f"https://api.openweathermap.org/data/2.5/weather?"
+        f"q={city['name']},{city['country']}&appid={API_KEY}"
+    )
+    try:
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        return data
+    except Exception as e:
+        print("Error:", e)
+        return None
+
+def transform_weather_json(raw):
+    if not raw:
+        return None
+
+    main = raw.get("main", {})
+    wind = raw.get("wind", {})
+
+    dt = raw.get("dt")
+    timestamp_utc = None
+    if dt:
+        timestamp_utc = datetime.utcfromtimestamp(dt).isoformat()
+
+    temperature = main.get("temp", None)
+    if temperature is not None:
+        temperature = temperature - 273.15  # Kelvin to Celsius
+
+    humidity = main.get("humidity", None)
+    wind_speed = wind.get("speed", None)
+
+    return {
+        "timestamp_utc": timestamp_utc,
+        "temperature_c": temperature,
+        "humidity": humidity,
+        "wind_speed": wind_speed
+    }
+
+def save_weather(city_id, weather):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO weather_readings (city_id, timestamp_utc, temperature_c, humidity, wind_speed)
+        VALUES (?, ?, ?, ?, ?)
+    """, (city_id, weather["timestamp_utc"], weather["temperature_c"],
+          weather["humidity"], weather["wind_speed"]))
+    conn.commit()
+    conn.close()
+
+def run_etl():
+    print("Running Weather ETL...")
+    init_db()
+    save_cities()
+
+    for city in CITIES:
+        print(f"Fetching weather for {city['name']}...")
+        raw = fetch_weather(city)
+        weather = transform_weather_json(raw)
+
+        if weather:
+            save_weather(city["id"], weather)
+            print(f"Saved weather for {city['name']}")
+        else:
+            print(f"Skipping {city['name']} due to fetch error.")
+
+    print("ETL Complete.")
+
+if __name__ == "__main__":
+    run_etl()
